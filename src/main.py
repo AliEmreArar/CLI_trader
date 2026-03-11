@@ -2,19 +2,15 @@ import sqlite3
 import sys
 import os
 import math
+import random
 from datetime import datetime, timedelta
 
 DB_PATH = 'data/bist_model_ready.db'
-HISTORY_DB_PATH = '/mnt/ab-scratch/.ab-019cc8f7-a666-7703-9dd0-d9bb60b48ce9-a/upper/data/bist_model_ready.db'
 
 def get_db_connection():
     try:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
-        
-        # Attach history database
-        conn.execute(f"ATTACH DATABASE '{HISTORY_DB_PATH}' AS history")
-        
         return conn
     except sqlite3.Error as e:
         print(f"Error connecting to database: {e}")
@@ -58,10 +54,11 @@ def main_menu():
         print("1. List Stocks (Paginated)")
         print("2. View Portfolio")
         print("3. Add Stock to Portfolio")
-        print("4. Exit")
-        
-        choice = input("\nEnter your choice (1-4): ")
-        
+        print("4. Trading Game")
+        print("5. Exit")
+
+        choice = input("\nEnter your choice (1-5): ")
+
         if choice == '1':
             list_stocks_menu()
         elif choice == '2':
@@ -69,6 +66,8 @@ def main_menu():
         elif choice == '3':
             add_to_portfolio()
         elif choice == '4':
+            trading_game()
+        elif choice == '5':
             print("Goodbye!")
             sys.exit(0)
         else:
@@ -79,7 +78,7 @@ def list_stocks_menu():
     cursor = conn.cursor()
     
     # Get total count of unique stocks
-    cursor.execute("SELECT COUNT(DISTINCT symbol) FROM history.model_data")
+    cursor.execute("SELECT COUNT(DISTINCT symbol) FROM model_data")
     total_stocks = cursor.fetchone()[0]
     
     page_size = 10
@@ -94,7 +93,7 @@ def list_stocks_menu():
         print("--------------------------------------------------")
         
         offset = (current_page - 1) * page_size
-        cursor.execute("SELECT DISTINCT symbol FROM history.model_data ORDER BY symbol LIMIT ? OFFSET ?", (page_size, offset))
+        cursor.execute("SELECT DISTINCT symbol FROM model_data ORDER BY symbol LIMIT ? OFFSET ?", (page_size, offset))
         stocks = cursor.fetchall()
         
         for stock in stocks:
@@ -117,7 +116,7 @@ def list_stocks_menu():
                 input("You are on the first page. Press Enter to continue...")
         elif choice == 's':
             symbol = input("Enter stock symbol to select: ").upper()
-            cursor.execute("SELECT 1 FROM history.model_data WHERE symbol = ?", (symbol,))
+            cursor.execute("SELECT 1 FROM model_data WHERE symbol = ?", (symbol,))
             if cursor.fetchone():
                 display_stock_chart(conn, symbol)
             else:
@@ -178,7 +177,7 @@ def display_stock_chart(conn, symbol):
         
         # Fetch price data sorted by date
         try:
-            cursor.execute("SELECT date, close FROM history.model_data WHERE symbol = ? ORDER BY date", (symbol,))
+            cursor.execute("SELECT date, close FROM model_data WHERE symbol = ? ORDER BY date", (symbol,))
             raw_data = cursor.fetchall()
         except sqlite3.Error as e:
             print(f"Database error: {e}")
@@ -319,7 +318,7 @@ def build_portfolio_timeseries(conn):
     symbols = [item['symbol'] for item in portfolio]
     placeholders = ','.join('?' for _ in symbols)
     cursor.execute(
-        f"SELECT DISTINCT date FROM history.model_data WHERE symbol IN ({placeholders}) ORDER BY date",
+        f"SELECT DISTINCT date FROM model_data WHERE symbol IN ({placeholders}) ORDER BY date",
         symbols
     )
     dates = [row['date'] for row in cursor.fetchall()]
@@ -337,7 +336,7 @@ def build_portfolio_timeseries(conn):
     price_cache = {}
     for item in portfolio:
         symbol = item['symbol']
-        cursor.execute("SELECT date, close FROM history.model_data WHERE symbol = ? ORDER BY date", (symbol,))
+        cursor.execute("SELECT date, close FROM model_data WHERE symbol = ? ORDER BY date", (symbol,))
         rows = cursor.fetchall()
         price_cache[symbol] = {row['date']: row['close'] for row in rows}
 
@@ -492,7 +491,7 @@ def view_portfolio():
                 added_at = item['added_at']
                 
                 # Get latest price
-                cursor.execute("SELECT close FROM history.model_data WHERE symbol = ? ORDER BY date DESC LIMIT 1", (symbol,))
+                cursor.execute("SELECT close FROM model_data WHERE symbol = ? ORDER BY date DESC LIMIT 1", (symbol,))
                 price_row = cursor.fetchone()
                 current_price = price_row['close'] if price_row else None
                 
@@ -584,7 +583,7 @@ def view_portfolio():
             update_portfolio_entry()
         elif choice == 's':
             symbol = input("Enter stock symbol to select: ").upper()
-            cursor.execute("SELECT 1 FROM history.model_data WHERE symbol = ?", (symbol,))
+            cursor.execute("SELECT 1 FROM model_data WHERE symbol = ?", (symbol,))
             if cursor.fetchone():
                 display_stock_chart(conn, symbol)
             else:
@@ -615,7 +614,7 @@ def add_to_portfolio():
 
     try:
         # Check if symbol exists in model_data
-        cursor.execute("SELECT 1 FROM history.model_data WHERE symbol = ? LIMIT 1", (symbol,))
+        cursor.execute("SELECT 1 FROM model_data WHERE symbol = ? LIMIT 1", (symbol,))
         if not cursor.fetchone():
             print(f"Error: Stock '{symbol}' does not exist in the database.")
             input("Press Enter to continue...")
@@ -766,6 +765,361 @@ def remove_from_portfolio():
         input("Press Enter to continue...")
     finally:
         conn.close()
+
+
+def display_game_chart(prices, interval_name="Day", width=60, height=15):
+    """Display a simple ASCII chart for the trading game without dates."""
+    if len(prices) < 2:
+        return
+
+    min_price = min(prices)
+    max_price = max(prices)
+    price_range = max_price - min_price
+    if price_range == 0:
+        price_range = 1
+
+    # Create grid
+    grid = [[' ' for _ in range(width)] for _ in range(height)]
+
+    # Map prices to grid
+    num_points = min(len(prices), width)
+    for x in range(num_points):
+        price = prices[x]
+        normalized_price = (price - min_price) / price_range
+        y = int(normalized_price * (height - 1))
+        row_idx = height - 1 - y
+        if 0 <= row_idx < height:
+            grid[row_idx][x] = '*'
+
+    # Draw connecting line between points
+    for i in range(num_points - 1):
+        x1, x2 = i, i + 1
+        price1, price2 = prices[x1], prices[x2]
+        y1 = int(((price1 - min_price) / price_range) * (height - 1))
+        y2 = int(((price2 - min_price) / price_range) * (height - 1))
+        row1 = height - 1 - y1
+        row2 = height - 1 - y2
+
+        # Simple line drawing
+        if abs(row2 - row1) > 1:
+            step = 1 if row2 > row1 else -1
+            for r in range(row1 + step, row2, step):
+                if 0 <= r < height and x1 < width:
+                    grid[r][x1] = '|'
+
+    # Print chart
+    period_label = "30-period"
+    print(f"\n{f'Price Chart ({period_label})':^{width + 12}}")
+    print(f"Range: {min_price:.2f} - {max_price:.2f}")
+    print("-" * (width + 12))
+
+    for i in range(height):
+        y_val = max_price - (i / (height - 1)) * price_range
+        row_str = "".join(grid[i])
+        print(f"{y_val:8.2f} | {row_str}")
+
+    print(" " * 9 + "-" * width)
+    print(" " * 9 + f"{interval_name} 1" + " " * (width - 12) + f"{interval_name} {num_points}")
+
+
+def generate_random_chart_options(conn, interval='D', num_options=3):
+    """Generate random stock chart options for the trading game."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT DISTINCT symbol FROM model_data")
+    all_symbols = [row[0] for row in cursor.fetchall()]
+
+    options = []
+    attempts = 0
+    max_attempts = 100
+
+    while len(options) < num_options and attempts < max_attempts:
+        attempts += 1
+        symbol = random.choice(all_symbols)
+
+        # Get data for this symbol
+        cursor.execute("SELECT date, close FROM model_data WHERE symbol = ? ORDER BY date", (symbol,))
+        raw_data = cursor.fetchall()
+        
+        # Resample data if needed
+        # We need to convert sqlite.Row to dict for resample_data
+        formatted_data = [{'date': row['date'], 'close': row['close']} for row in raw_data]
+        data = resample_data(formatted_data, interval)
+
+        if not data or len(data) < 31:
+            continue
+
+        # Select a random 30-period window
+        max_start_index = len(data) - 31
+        start_index = random.randint(0, max_start_index)
+        end_index = start_index + 30
+
+        period_data = data[start_index:end_index]
+        next_period_data = data[end_index]
+
+        prices = [row['close'] for row in period_data]
+
+        # Check if this exact chart is already in options
+        is_duplicate = False
+        for opt in options:
+            if opt['symbol'] == symbol and opt['prices'] == prices:
+                is_duplicate = True
+                break
+
+        if not is_duplicate:
+            options.append({
+                'symbol': symbol,
+                'prices': prices,
+                'next_price': next_period_data['close'],
+                'last_price': prices[-1]
+            })
+
+    return options
+
+
+def display_trading_history(trade_history, virtual_balance):
+    """Display trading history for the current session."""
+    clear_screen()
+    print("=== Trading Game History ===")
+    print(f"Current balance: ${virtual_balance:,.2f}\n")
+
+    if not trade_history:
+        print("No trades yet.")
+        input("Press Enter to continue...")
+        return
+
+    header = f"{'#':<4} {'Symbol':<8} {'Int':<5} {'Guess':<6} {'Invested':<12} {'Result':<10} {'P/L':<12} {'Balance':<12}"
+    print(header)
+    print("-" * len(header))
+
+    for index, trade in enumerate(trade_history, 1):
+        pnl = trade['pnl']
+        pnl_str = f"{pnl:,.2f}"
+        if pnl > 0:
+            pnl_str = color_text(pnl_str, '32')
+        elif pnl < 0:
+            pnl_str = color_text(pnl_str, '31')
+
+        interval_code = trade.get('interval', 'D')
+        
+        print(
+            f"{index:<4} {trade['symbol']:<8} {interval_code:<5} {trade['guess']:<6} "
+            f"${trade['investment']:<11,.2f} {trade['result']:<10} {pnl_str:<12} "
+            f"${trade['balance']:<11,.2f}"
+        )
+
+    input("\nPress Enter to continue...")
+
+
+def trading_game():
+    """Trading game where user guesses price direction."""
+    virtual_balance = 10000.0
+    trade_history = []
+    interval = 'D'  # Default interval
+
+    while True:
+        clear_screen()
+        
+        interval_name = "Daily"
+        if interval == 'W':
+            interval_name = "Weekly"
+        elif interval == 'M':
+            interval_name = "Monthly"
+            
+        print(f"=== Trading Game ({interval_name}) ===")
+        print(f"Your virtual balance: ${virtual_balance:,.2f}")
+        print("\nLoading chart options...")
+
+        conn = get_db_connection()
+
+        # Generate random chart options based on selected interval
+        chart_options = generate_random_chart_options(conn, interval)
+
+        if not chart_options:
+            print(f"\nError generating chart options for {interval_name} interval. Trying Daily...")
+            interval = 'D'
+            chart_options = generate_random_chart_options(conn, 'D')
+            if not chart_options:
+                print("Error generating chart options. Please try again.")
+                input("Press Enter to continue...")
+                conn.close()
+                continue
+
+        # Display chart options
+        clear_screen()
+        print(f"=== Trading Game ({interval_name}) ===")
+        print(f"Your virtual balance: ${virtual_balance:,.2f}")
+        print(f"\nChoose a chart to trade for the NEXT {interval_name.upper().rstrip('LY')}:\n")
+
+        period_unit = "Day"
+        if interval == 'W':
+            period_unit = "Week"
+        elif interval == 'M':
+            period_unit = "Month"
+
+        for i, option in enumerate(chart_options, 1):
+            print(f"--- Option {i}: {option['symbol']} ---")
+            display_game_chart(option['prices'], interval_name=period_unit, width=50, height=12)
+            print(f"Current price: ${option['last_price']:.2f}\n")
+
+        print("[1-3] Select Chart  [R]efresh  [H]istory  [I]nterval  [B]ack")
+        choice = input("Choice: ").upper()
+
+        if choice == 'B':
+            conn.close()
+            return
+            
+        if choice == 'I':
+            conn.close()
+            print("\nSelect Time Interval:")
+            print("1. Daily (Predict next day)")
+            print("2. Weekly (Predict next week)")
+            print("3. Monthly (Predict next month)")
+            int_choice = input("Choice (1-3): ")
+            if int_choice == '2':
+                interval = 'W'
+            elif int_choice == '3':
+                interval = 'M'
+            else:
+                interval = 'D'
+            continue
+
+        if choice == 'R':
+            conn.close()
+            continue
+
+        if choice == 'H':
+            conn.close()
+            display_trading_history(trade_history, virtual_balance)
+            continue
+
+        try:
+            chart_index = int(choice) - 1
+            if chart_index < 0 or chart_index >= len(chart_options):
+                print("Invalid choice.")
+                input("Press Enter to continue...")
+                conn.close()
+                continue
+        except ValueError:
+            print("Invalid choice.")
+            input("Press Enter to continue...")
+            conn.close()
+            continue
+
+        selected = chart_options[chart_index]
+        symbol = selected['symbol']
+        prices = selected['prices']
+        last_price = selected['last_price']
+        next_price = selected['next_price']
+
+        # Ask for direction
+        clear_screen()
+        print(f"=== Trading Game: {symbol} ({interval_name}) ===")
+        print(f"Your virtual balance: ${virtual_balance:,.2f}")
+        display_game_chart(prices, interval_name=period_unit)
+        print(f"\nCurrent price (end of period): ${last_price:.2f}")
+        print(f"\nWill the price go UP or DOWN in the next {period_unit.lower()}?")
+
+        direction = input("Enter [U]P or [D]OWN: ").upper()
+        while direction not in ['U', 'D', 'UP', 'DOWN']:
+            direction = input("Invalid choice. Enter [U]P or [D]OWN: ").upper()
+
+        if direction in ['U', 'UP']:
+            direction = 'UP'
+        else:
+            direction = 'DOWN'
+
+        # Get investment amount
+        print(f"\nHow much do you want to invest? (Available: ${virtual_balance:,.2f})")
+        while True:
+            try:
+                investment_input = input("Investment amount: $").strip()
+                investment = float(investment_input)
+                if investment <= 0:
+                    print("Investment must be positive.")
+                    continue
+                if investment > virtual_balance:
+                    print(f"You cannot invest more than your balance (${virtual_balance:,.2f}).")
+                    continue
+                break
+            except ValueError:
+                print("Invalid amount. Please enter a number.")
+
+        # Reveal result
+        clear_screen()
+        print(f"=== Trading Game Result ({interval_name}) ===")
+        print(f"\nSymbol: {symbol}")
+        print(f"Your guess: {direction}")
+        print(f"Investment: ${investment:,.2f}")
+        print(f"\nLast {period_unit.lower()} price: ${last_price:.2f}")
+        print(f"Next {period_unit.lower()} price: ${next_price:.2f}")
+
+        actual_direction = 'UP' if next_price > last_price else 'DOWN'
+        price_change = abs(next_price - last_price)
+        price_change_pct = (price_change / last_price) * 100
+
+        print(f"\nActual direction: {actual_direction}")
+        print(f"Price change: ${price_change:.2f} ({price_change_pct:.2f}%)")
+
+        # Calculate result
+        result_amount = investment * (price_change_pct / 100)
+        if direction == actual_direction:
+            # Win
+            virtual_balance += result_amount
+            result_label = "WIN"
+            pnl_amount = result_amount
+            print(f"\n🎉 CORRECT! You won ${result_amount:,.2f}!")
+            print(f"New balance: ${virtual_balance:,.2f}")
+        else:
+            # Lose
+            virtual_balance -= result_amount
+            result_label = "LOSS"
+            pnl_amount = -result_amount
+            print(f"\n😞 Wrong! You lost ${result_amount:,.2f}.")
+            print(f"New balance: ${virtual_balance:,.2f}")
+
+        trade_history.append({
+            'symbol': symbol,
+            'guess': direction,
+            'investment': investment,
+            'result': result_label,
+            'pnl': pnl_amount,
+            'balance': virtual_balance,
+            'interval': interval
+        })
+
+        if virtual_balance <= 0:
+            print("\n💸 You've run out of money! Game over.")
+            input("Press Enter to return to the main menu...")
+            conn.close()
+            return
+
+        print("\n[P]lay again  [H]istory  [I]nterval  [B]ack to menu")
+        choice = input("Choice: ").upper()
+        
+        conn.close()
+
+        if choice == 'H':
+            display_trading_history(trade_history, virtual_balance)
+            # Re-open connection handled at start of loop
+            continue
+            
+        if choice == 'I':
+            print("\nSelect Time Interval:")
+            print("1. Daily (Predict next day)")
+            print("2. Weekly (Predict next week)")
+            print("3. Monthly (Predict next month)")
+            int_choice = input("Choice (1-3): ")
+            if int_choice == '2':
+                interval = 'W'
+            elif int_choice == '3':
+                interval = 'M'
+            else:
+                interval = 'D'
+            continue
+
+        if choice == 'B':
+            return
+
 
 if __name__ == "__main__":
     conn = get_db_connection()
